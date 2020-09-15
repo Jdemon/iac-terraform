@@ -4,7 +4,7 @@ resource "random_pet" "petname" {
 }
 
 resource "digitalocean_kubernetes_cluster" "kube" {
-  name    = "${var.env}-${random_pet.petname.id}"
+  name    = "kube-${var.env}"
   region  = var.region
   version = data.digitalocean_kubernetes_versions.versions.latest_version
 
@@ -15,18 +15,7 @@ resource "digitalocean_kubernetes_cluster" "kube" {
   }
 }
 
-resource "digitalocean_project_resources" "resources" {
-  project   = data.digitalocean_project.name.id
-  resources = [
-    "do:kubernetes:${digitalocean_kubernetes_cluster.kube.id}",
-    ]
-}
-
 data "digitalocean_kubernetes_versions" "versions" {}
-
-data "digitalocean_project" "name" {
-  name = var.project_name
-}
 
 resource "random_password" "argopass" {
   length = 16
@@ -54,37 +43,14 @@ resource "helm_release" "argocd_release" {
     value = "date \"2030-01-01T23:59:59Z\" now"
   }
 
-  depends_on = [
-    random_password.argopass,
-  ]
-}
-
-resource "kubectl_manifest" "cert-manager" {
-    yaml_body = file("${path.module}/asset/cert-manager.yaml")
-
-  depends_on = [
-    random_password.argopass,
-  ]
-}
-
-resource "helm_release" "nginx_ingress" {
-  name      = "nginx"
-  repository = "https://kubernetes-charts.storage.googleapis.com"
-  chart     = "nginx-ingress"
-  namespace = "kube-system"
-
   set {
-    name = "controller.publishService.enabled"
-    value = "true"
-  }
-
-  set {
-    name = "controller.extraArgs.enable-ssl-passthrough"
-    value = ""
+    name  = "server.extraArgs[0]"
+    type = "string"
+    value = "--insecure"
   }
 
   depends_on = [
-    kubectl_manifest.cert-manager
+    random_password.argopass,
   ]
 }
 
@@ -94,11 +60,11 @@ resource "kubernetes_ingress" "argocd_ingress" {
     namespace = "argocd"
     annotations = {
       "cert-manager.io/cluster-issuer" = "letsencrypt-prod"
-      "kubernetes.io/ingress.class" = "nginx"
       "kubernetes.io/tls-acme" = "true"
-      "nginx.ingress.kubernetes.io/force-ssl-redirect" = "true"
-      "nginx.ingress.kubernetes.io/ssl-passthrough"= "true"
-      "nginx.ingress.kubernetes.io/backend-protocol" = "HTTPS"
+      "kubernetes.io/ingress.class" = "kong"
+      "kubernetes.io/ingress.allow-http" = "false"
+      "konghq.com/https-redirect-status-code" = "307"
+      "configuration.konghq.com/protocols" = "https"
     }
   }
 
@@ -126,7 +92,7 @@ resource "kubernetes_ingress" "argocd_ingress" {
   wait_for_load_balancer = true
 
   depends_on = [
-    helm_release.nginx_ingress,
+    kubectl_manifest.dev-cert-manager,
   ]
 }
 
@@ -137,16 +103,4 @@ resource "digitalocean_record" "argocd" {
   name   = "argocd-${var.env}"
   value  = kubernetes_ingress.argocd_ingress.load_balancer_ingress[0].ip
 }
-
-
-resource "kubectl_manifest" "dev-cert-manager" {
-    yaml_body = file("${path.module}/asset/prod-certmgnt.yaml")
-
-  depends_on = [
-    kubernetes_ingress.argocd_ingress,
-    kubectl_manifest.cert-manager,
-  ]
-}
-
-
 
